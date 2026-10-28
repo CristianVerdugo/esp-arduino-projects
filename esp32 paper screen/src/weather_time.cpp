@@ -2,13 +2,17 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
 
-static const char *COUNTRY_CODE = "de";
-static const char *POST_CODE = "91325"; // Adelsdorf
+static const char *DEFAULT_COUNTRY_CODE = "de";
+static const char *DEFAULT_POST_CODE = "91325"; // Adelsdorf
 
-static const unsigned long WEATHER_INTERVAL_MS = 15UL * 60UL * 1000UL;
+static String countryCode = DEFAULT_COUNTRY_CODE;
+static String postCode = DEFAULT_POST_CODE;
+
+static const unsigned long WEATHER_INTERVAL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long TIME_INTERVAL_MS = 10UL * 1000UL;
 
 static WeatherData weather;
@@ -41,9 +45,18 @@ static bool httpGetJson(const String &url, JsonDocument &doc) {
   return true;
 }
 
-static bool lookupPostCode() {
+static bool validLocationInput(const String &country, const String &post) {
+  if (country.length() != 2 || post.length() == 0 || post.length() > 12) return false;
+  for (char c : country) if (!isalpha((unsigned char)c)) return false;
+  for (char c : post) if (!isalnum((unsigned char)c) && c != ' ' && c != '-') return false;
+  return true;
+}
+
+static bool lookupPostCode(const String &country, const String &post) {
   JsonDocument doc;
-  String url = String("https://api.zippopotam.us/") + COUNTRY_CODE + "/" + POST_CODE;
+  String encoded = post;
+  encoded.replace(" ", "%20");
+  String url = String("https://api.zippopotam.us/") + country + "/" + encoded;
   if (!httpGetJson(url, doc)) return false;
 
   JsonObject place = doc["places"][0];
@@ -79,7 +92,53 @@ static bool fetchWeather() {
 
 const WeatherData &getWeather() { return weather; }
 
-const char *getPostCode() { return POST_CODE; }
+const char *getPostCode() { return postCode.c_str(); }
+
+const char *getCountryCode() { return countryCode.c_str(); }
+
+void loadSavedLocation() {
+  Preferences prefs;
+  prefs.begin("weather", true);
+  String c = prefs.getString("country", DEFAULT_COUNTRY_CODE);
+  String p = prefs.getString("post", DEFAULT_POST_CODE);
+  prefs.end();
+  if (validLocationInput(c, p)) {
+    countryCode = c;
+    postCode = p;
+  }
+}
+
+bool setLocation(const String &country, const String &post) {
+  String c = country, p = post;
+  c.trim();
+  p.trim();
+  c.toLowerCase();
+  if (!validLocationInput(c, p)) return false;
+
+  // Remember the old coordinates so a failed lookup leaves the current location intact.
+  float oldLat = latitude, oldLon = longitude;
+  String oldName = weather.placeName;
+  if (!lookupPostCode(c, p)) {
+    latitude = oldLat;
+    longitude = oldLon;
+    weather.placeName = oldName;
+    return false;
+  }
+
+  countryCode = c;
+  postCode = p;
+  Preferences prefs;
+  prefs.begin("weather", false);
+  prefs.putString("country", c);
+  prefs.putString("post", p);
+  prefs.end();
+
+  haveLocation = true;
+  weather.valid = false;
+  fetchWeather();
+  lastWeather = millis();
+  return true;
+}
 
 const char *weatherText(int code) {
   if (code == 0) return "Clear sky";
@@ -101,7 +160,7 @@ bool getTimeString(char *buf, size_t len, uint32_t timeoutMs) {
 }
 
 void updateWeatherAndTime() {
-  if (!haveLocation) haveLocation = lookupPostCode();
+  if (!haveLocation) haveLocation = lookupPostCode(countryCode, postCode);
 
   if (haveLocation && (!weather.valid || millis() - lastWeather >= WEATHER_INTERVAL_MS)) {
     fetchWeather();
